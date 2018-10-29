@@ -4,15 +4,15 @@ import io.ktor.server.engine.*
 import io.ktor.server.jetty.*
 import io.ktor.server.servlet.*
 import io.ktor.server.testing.*
-import kotlinx.atomicfu.*
 import org.eclipse.jetty.server.*
 import org.eclipse.jetty.server.handler.*
 import org.eclipse.jetty.servlet.*
-import org.junit.Ignore
+import org.junit.*
 import java.security.*
+import java.util.concurrent.locks.*
 import javax.servlet.*
 import javax.servlet.http.*
-import kotlin.test.*
+import kotlin.concurrent.*
 
 class JettyAsyncServletContainerEngineTest :
     EngineTestSuite<JettyApplicationEngineBase, JettyApplicationEngineBase.Configuration>(Servlet(async = true))
@@ -20,14 +20,19 @@ class JettyAsyncServletContainerEngineTest :
 class JettyBlockingServletContainerEngineTest :
     EngineTestSuite<JettyApplicationEngineBase, JettyApplicationEngineBase.Configuration>(Servlet(async = false)) {
     @Ignore
-    override fun testUpgrade() {}
+    override fun testUpgrade() {
+    }
 }
 
 // the factory and engine are only suitable for testing
 // you shouldn't use it for production code
 
-private class Servlet(private val async: Boolean) : ApplicationEngineFactory<JettyServletApplicationEngine, JettyApplicationEngineBase.Configuration> {
-    override fun create(environment: ApplicationEngineEnvironment, configure: JettyApplicationEngineBase.Configuration.() -> Unit): JettyServletApplicationEngine {
+private class Servlet(private val async: Boolean) :
+    ApplicationEngineFactory<JettyServletApplicationEngine, JettyApplicationEngineBase.Configuration> {
+    override fun create(
+        environment: ApplicationEngineEnvironment,
+        configure: JettyApplicationEngineBase.Configuration.() -> Unit
+    ): JettyServletApplicationEngine {
         return JettyServletApplicationEngine(environment, configure, async)
     }
 }
@@ -57,7 +62,7 @@ private class JettyServletApplicationEngine(
                         pathSpecs = arrayOf("*.", "/*")
                         servletName = "ktor-servlet"
                     })
-            })
+                })
         }
 
         if (async) {
@@ -71,48 +76,68 @@ private class JettyServletApplicationEngine(
 }
 
 private class JavaSecurityHandler : HandlerWrapper() {
+    private val securityManager = RestrictThreadCreationSecurityManager(null)
+
     override fun handle(
         target: String?,
         baseRequest: Request?,
         request: HttpServletRequest?,
         response: HttpServletResponse?
     ) {
-        val oldSecurityManager: SecurityManager? = System.getSecurityManager()
-        val securityManager = RestrictThreadCreationSecurityManager(oldSecurityManager)
-        System.setSecurityManager(securityManager)
+        securityManager.enter()
         try {
             super.handle(target, baseRequest, request, response)
         } finally {
-            securityManager.allowSwitchToSecurityManager(oldSecurityManager)
-            System.setSecurityManager(oldSecurityManager)
+            securityManager.leave()
         }
     }
 }
 
 private class RestrictThreadCreationSecurityManager(val delegate: SecurityManager?) : SecurityManager() {
-    private val allowSwitchBack = atomic(false)
+    private val lock = ReentrantLock()
+    private var refCount = 0
 
-    fun allowSwitchToSecurityManager(manager: SecurityManager?) {
-        if (!allowSwitchBack.compareAndSet(false, true)) {
-            throw SecurityException("Could be allowed only once")
+    internal fun enter() {
+        lock.withLock {
+            refCount++
+            if (refCount == 1) {
+                System.setSecurityManager(this)
+            }
+        }
+    }
+
+    internal fun leave() {
+        lock.withLock {
+            if (refCount == 0) throw IllegalStateException("enter/leave balance violation")
+            refCount--
+            if (refCount == 0) {
+                System.setSecurityManager(null)
+            }
         }
     }
 
     override fun checkPermission(perm: Permission?) {
         if (perm is RuntimePermission && perm.name == "modifyThreadGroup") {
-            if (currentStackTrace().any { it.className == "org.eclipse.jetty.util.thread.QueuedThreadPool" &&
-                it.methodName == "newThread" }) return // allow
-
-            throw SecurityException("Thread modifications are not allowed")
+            if (inJavaSecurityHandler()) {
+                throw SecurityException("Thread modifications are not allowed")
+            }
         }
         if (perm is RuntimePermission && perm.name == "setSecurityManager") {
-            if (!allowSwitchBack.value) {
+            if (!isCalledByMe()) {
                 throw SecurityException("SecurityManager change is not allowed")
             }
             return
         }
 
         delegate?.checkPermission(perm)
+    }
+
+    private fun inJavaSecurityHandler(): Boolean {
+        return JavaSecurityHandler::class.java in classContext
+    }
+
+    private fun isCalledByMe(): Boolean {
+        return javaClass in classContext
     }
 
     private var rootGroup: ThreadGroup? = null
