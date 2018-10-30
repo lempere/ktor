@@ -98,7 +98,7 @@ abstract class KtorServlet : HttpServlet(), CoroutineScope {
             else -> coroutineContext
         }
 
-        runBlocking(context) {
+        runBlocking(context.minusKey(ContinuationInterceptor)) {
             val call = BlockingServletApplicationCall(application, request, response, coroutineContext)
             enginePipeline.execute(call)
         }
