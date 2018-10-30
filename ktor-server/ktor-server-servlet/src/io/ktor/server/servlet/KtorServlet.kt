@@ -33,7 +33,8 @@ abstract class KtorServlet : HttpServlet(), CoroutineScope {
      */
     protected abstract val upgrade: ServletUpgrade
 
-    override val coroutineContext: CoroutineContext  = Dispatchers.Unconfined + SupervisorJob() + CoroutineName("servlet")
+    override val coroutineContext: CoroutineContext =
+        Dispatchers.Unconfined + SupervisorJob() + CoroutineName("servlet")
 
     /**
      * Called by servlet container when the application is going to be undeployed or stopped.
@@ -91,7 +92,13 @@ abstract class KtorServlet : HttpServlet(), CoroutineScope {
     }
 
     private fun blockingService(request: HttpServletRequest, response: HttpServletResponse) {
-        runBlocking(coroutineContext) {
+        val manager = System.getSecurityManager()
+        val context = when {
+            manager is ThreadContextElement<*> -> coroutineContext + manager
+            else -> coroutineContext
+        }
+
+        runBlocking(context) {
             val call = BlockingServletApplicationCall(application, request, response, coroutineContext)
             enginePipeline.execute(call)
         }
