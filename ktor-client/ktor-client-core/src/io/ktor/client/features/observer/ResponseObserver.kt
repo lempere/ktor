@@ -10,7 +10,7 @@ import kotlin.math.*
 internal typealias ResponseHandler = suspend (HttpResponse) -> Unit
 
 /**
- * Observe response body feature.
+ * Observe response feature.
  */
 class ResponseObserver(
     private val responseHandler: ResponseHandler
